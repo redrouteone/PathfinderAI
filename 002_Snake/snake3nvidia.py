@@ -1,3 +1,4 @@
+import os
 import pygame
 import random
 import torch
@@ -5,20 +6,20 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
-import os
+import time
 from collections import deque
 
 # -------------------------
 # Hyperparameters / Config
 # -------------------------
-WIDTH = 400
-HEIGHT = 400
-BLOCK_SIZE = 20
-FPS = 60  # Frames per second for rendering
+WIDTH = 1600            # Internal resolution width
+HEIGHT = 1600           # Internal resolution height
+BLOCK_SIZE = 80
+FPS = 30               # Frames per second for rendering
 
-NUM_EPISODES = 10000  # Total number of episodes to train
+NUM_EPISODES = 10000   # Total number of episodes to train
 MAX_STEPS_PER_EPISODE = 1000
-RENDER_EVERY = 50  # Render one episode every X episodes
+RENDER_EVERY = 100     # Render one episode every X episodes
 
 GAMMA = 0.9
 LR = 0.001
@@ -26,10 +27,10 @@ MEMORY_SIZE = 100_000
 BATCH_SIZE = 64
 EPSILON_START = 1.0
 EPSILON_END = 0.01
-EPSILON_DECAY = 0.99999
+EPSILON_DECAY = 0.995  # Set so that epsilon decays to ~0.01 over 30,000 episodes
 
 # Reward settings
-REWARD_APPLE = 50.0
+REWARD_APPLE = 40.0
 REWARD_DEATH = -10.0
 REWARD_STEP = -0.01
 
@@ -48,25 +49,34 @@ SNAKE_HEAD_COLOR = (0, 51, 0)   # Darker green for head
 APPLE_COLOR = (255, 0, 0)       # Red
 
 # -------------------------
-# Snake Game Environment (Local 3x3 View Version)
+# Snake Game Environment (Local 3x3 View Version) with Scaled Rendering and Extra "Apple Smell"
 # -------------------------
 class SnakeGame3:
-    def __init__(self, w=WIDTH, h=HEIGHT, block_size=BLOCK_SIZE):
-        self.w = w
-        self.h = h
-        self.block_size = block_size
-        self.grid_width = w // block_size
-        self.grid_height = h // block_size
-
-        # Initialize PyGame for rendering
+    def __init__(self, w=WIDTH, h=HEIGHT, block_size=BLOCK_SIZE, fullscreen=False, window_position=None):
+        # If a window_position is provided, set it before initializing pygame.
+        if window_position is not None:
+            os.environ["SDL_VIDEO_WINDOW_POS"] = f"{window_position[0]},{window_position[1]}"
         pygame.init()
-        self.screen = pygame.display.set_mode((w, h))
+        if fullscreen:
+            # Full-screen mode uses the current display resolution.
+            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            self.w, self.h = self.screen.get_size()
+        else:
+            # Use the RESIZABLE flag so you can change the window size.
+            self.screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
+            self.w = w
+            self.h = h
         pygame.display.set_caption("RL Snake 3")
         self.clock = pygame.time.Clock()
+        self.block_size = block_size
+        # Create an off-screen game surface at the fixed internal resolution.
+        self.game_surface = pygame.Surface((WIDTH, HEIGHT))
+        self.grid_width = WIDTH // block_size
+        self.grid_height = HEIGHT // block_size
         self.reset()
 
     def reset(self):
-        # Start in the middle of the board (using pixel coordinates)
+        # Start in the middle of the internal grid (using pixel coordinates of the internal resolution)
         self.snake = [(self.grid_width // 2 * self.block_size, 
                        self.grid_height // 2 * self.block_size)]
         self.direction = (self.block_size, 0)  # Start moving right
@@ -86,9 +96,9 @@ class SnakeGame3:
         reward = REWARD_STEP
         done = False
 
-        # Check collision with walls
-        if (new_head[0] < 0 or new_head[0] >= self.w or
-            new_head[1] < 0 or new_head[1] >= self.h):
+        # Check collision with walls (using internal resolution)
+        if (new_head[0] < 0 or new_head[0] >= WIDTH or
+            new_head[1] < 0 or new_head[1] >= HEIGHT):
             reward += REWARD_DEATH
             done = True
             return self._get_state(), reward, done
@@ -113,21 +123,25 @@ class SnakeGame3:
         return self._get_state(), reward, done
 
     def render(self):
-        self.screen.fill((0, 0, 0))
-        # Draw apple
+        # Draw on the off-screen game_surface (internal resolution)
+        self.game_surface.fill((0, 0, 0))
+        # Draw apple on the game_surface
         ax, ay = self.apple
-        pygame.draw.rect(self.screen, APPLE_COLOR,
+        pygame.draw.rect(self.game_surface, APPLE_COLOR,
                          (ax, ay, self.block_size, self.block_size))
-        # Draw snake (head and body)
+        # Draw snake on the game_surface
         for i, (x, y) in enumerate(self.snake):
             color = SNAKE_HEAD_COLOR if i == 0 else SNAKE_BODY_COLOR
-            pygame.draw.rect(self.screen, color,
+            pygame.draw.rect(self.game_surface, color,
                              (x, y, self.block_size, self.block_size))
+        # Scale the game_surface to the current window size
+        scaled_surface = pygame.transform.scale(self.game_surface, (self.screen.get_width(), self.screen.get_height()))
+        self.screen.blit(scaled_surface, (0, 0))
         pygame.display.flip()
         self.clock.tick(FPS)
 
     def _place_apple(self):
-        # Random placement avoiding the snake
+        # Random placement avoiding the snake (using internal grid coordinates)
         while True:
             pos = (random.randint(0, self.grid_width - 1) * self.block_size,
                    random.randint(0, self.grid_height - 1) * self.block_size)
@@ -136,41 +150,63 @@ class SnakeGame3:
 
     def _get_state(self):
         """
-        Returns a flattened 3x3 local view around the snake's head.
-        Encoding:
-          0.0 = empty
-          1.0 = wall (if out-of-bounds)
-          2.0 = apple
-          3.0 = snake body (non-head)
-          4.0 = snake head (center cell)
+        Returns an augmented state vector.
+        First 49 elements: flattened 7x7 local view around the snake's head.
+          Encoding for the local view:
+            0.0 = empty
+            1.0 = wall (if out-of-bounds)
+            2.0 = apple
+            3.0 = snake body (non-head)
+            4.0 = snake head (center cell)
+        Last 2 elements: relative position of the apple from the snake's head,
+          normalized to the range [-1, 1] (relative_x, relative_y).
         """
+        # Calculate the snake head's grid position.
         head_px, head_py = self.snake[0]
         head_x = head_px // self.block_size
         head_y = head_py // self.block_size
 
-        local_view = np.zeros((3, 3), dtype=np.float32)
-        for i in range(-1, 2):  # rows
-            for j in range(-1, 2):  # columns
+        view_size = 7
+        offset = view_size // 2  # For 7, offset will be 3.
+        local_view = np.zeros((view_size, view_size), dtype=np.float32)
+
+        # Fill in the local view.
+        for i in range(-offset, offset + 1):  # rows from -3 to 3
+            for j in range(-offset, offset + 1):  # columns from -3 to 3
                 grid_x = head_x + j
                 grid_y = head_y + i
-                view_i = i + 1  # convert [-1,0,1] to [0,1,2]
-                view_j = j + 1
+                view_i = i + offset  # convert from [-3, -2, ..., 3] to [0,...,6]
+                view_j = j + offset
 
                 if grid_x < 0 or grid_x >= self.grid_width or grid_y < 0 or grid_y >= self.grid_height:
-                    local_view[view_i, view_j] = 1.0  # wall
+                    local_view[view_i, view_j] = 1.0  # Mark out-of-bounds as wall.
                 else:
                     cell_px = grid_x * self.block_size
                     cell_py = grid_y * self.block_size
                     apple_x = self.apple[0] // self.block_size
                     apple_y = self.apple[1] // self.block_size
                     if grid_x == apple_x and grid_y == apple_y:
-                        local_view[view_i, view_j] = 2.0  # apple
+                        local_view[view_i, view_j] = 2.0  # Apple present.
                     elif (cell_px, cell_py) in self.snake[1:]:
-                        local_view[view_i, view_j] = 3.0  # snake body
+                        local_view[view_i, view_j] = 3.0  # Snake body.
                     else:
-                        local_view[view_i, view_j] = 0.0  # empty
-        local_view[1, 1] = 4.0  # Center is always the head.
-        return local_view.flatten()
+                        local_view[view_i, view_j] = 0.0  # Empty.
+        # Force the center cell to represent the snake's head.
+        local_view[offset, offset] = 4.0
+
+        # Compute relative position of the apple (in grid coordinates)
+        apple_x = self.apple[0] // self.block_size
+        apple_y = self.apple[1] // self.block_size
+        rel_x = apple_x - head_x
+        rel_y = apple_y - head_y
+
+        # Normalize the relative position to [-1, 1]
+        norm_rel_x = rel_x / (self.grid_width - 1)
+        norm_rel_y = rel_y / (self.grid_height - 1)
+
+        # Concatenate the flattened local view with the extra two features.
+        state_vector = np.concatenate([local_view.flatten(), np.array([norm_rel_x, norm_rel_y], dtype=np.float32)])
+        return state_vector
 
     def _change_direction(self, action):
         dx, dy = self.direction
@@ -215,11 +251,18 @@ class ReplayMemory:
         return len(self.buffer)
 
 # -------------------------
-# Training Loop with Checkpointing & CSV-Friendly Output
+# Training Loop with Checkpointing, CSV-Friendly Output, and Moving Average
 # -------------------------
 def train():
-    env = SnakeGame3()
-    # Local view: 9 elements (flattened 3x3)
+    # Create a timestamped folder for screenshots so files don't overwrite between runs.
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    screenshot_folder = f"screenshots_{timestamp}"
+    if not os.path.exists(screenshot_folder):
+        os.makedirs(screenshot_folder)
+
+    # Set window position (e.g., (100, 100)) and choose full-screen mode if desired.
+    env = SnakeGame3(fullscreen=False, window_position=(100, 100))
+    # Local view: 9 elements (flattened 3x3) plus 2 extra features = 11.
     state_dim = len(env.reset())
     action_dim = len(ACTIONS)
     high_score = -float('inf')
@@ -266,6 +309,10 @@ def train():
     else:
         print("Starting training from scratch.")
 
+    # Moving average window size for score
+    moving_avg_window = 300
+    prev_moving_avg = None  # Track previous moving average for comparison
+
     # --- Training Loop ---
     for episode in range(start_episode, NUM_EPISODES):
         state = env.reset()
@@ -292,7 +339,7 @@ def train():
             total_reward += reward
             next_state_tensor = torch.tensor(next_state, dtype=torch.float32, device=device).unsqueeze(0)
 
-            # Store experience (store as numpy arrays to save memory)
+            # Store experience (stored as numpy arrays to save memory)
             memory.push(state.squeeze(0).cpu().numpy(),
                         action,
                         reward,
@@ -301,12 +348,12 @@ def train():
             state = next_state_tensor
 
             if len(memory) > BATCH_SIZE:
-                # Vectorized conversion of replay batch
-                states_b = torch.tensor(np.array(memory.sample(BATCH_SIZE)[0]), dtype=torch.float32, device=device)
-                actions_b = torch.tensor(memory.sample(BATCH_SIZE)[1], dtype=torch.long, device=device)
-                rewards_b = torch.tensor(memory.sample(BATCH_SIZE)[2], dtype=torch.float32, device=device)
-                next_states_b = torch.tensor(np.array(memory.sample(BATCH_SIZE)[3]), dtype=torch.float32, device=device)
-                dones_b = torch.tensor(memory.sample(BATCH_SIZE)[4], dtype=torch.float32, device=device)
+                states_b, actions_b, rewards_b, next_states_b, dones_b = memory.sample(BATCH_SIZE)
+                states_b = torch.tensor(np.array(states_b), dtype=torch.float32, device=device)
+                actions_b = torch.tensor(actions_b, dtype=torch.long, device=device)
+                rewards_b = torch.tensor(rewards_b, dtype=torch.float32, device=device)
+                next_states_b = torch.tensor(np.array(next_states_b), dtype=torch.float32, device=device)
+                dones_b = torch.tensor(dones_b, dtype=torch.float32, device=device)
 
                 q_values = policy_net(states_b)
                 q_values = q_values.gather(1, actions_b.unsqueeze(1)).squeeze(1)
@@ -320,24 +367,37 @@ def train():
                 optimizer.step()
 
             if done:
-                # Optionally, save a screenshot of the final state:
-                pygame.image.save(env.screen, f"final_state_episode_{episode+1}.png")
                 break
 
         epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
         episode_rewards.append(total_reward)
 
-        if (episode + 1) % 10 == 0:
-            avg_reward = sum(episode_rewards[-10:]) / 10
-            print(f"AVE, {episode+1}, {NUM_EPISODES}, {avg_reward:.2f}, {epsilon:.4f}")
+        # Compute the moving average over the last moving_avg_window episodes.
+        if len(episode_rewards) >= moving_avg_window:
+            moving_avg = sum(episode_rewards[-moving_avg_window:]) / moving_avg_window
+        else:
+            moving_avg = sum(episode_rewards) / len(episode_rewards)
 
+        if prev_moving_avg is None:
+            csv_color = "\033[92m"  # Default to green for the first print.
+        else:
+            # If the current moving average is strictly greater, use green; otherwise (equal or lower) use red.
+            csv_color = "\033[92m" if moving_avg > prev_moving_avg else "\033[91m"
+        print(csv_color + f"AVE, {episode+1}, {NUM_EPISODES}, {avg_reward:.2f}, {epsilon:.4f}, MOV, {moving_avg:.2f}" + "\033[0m")
+        prev_moving_avg = moving_avg
+
+        # CSV-friendly output every 100 episodes:
+        if (episode + 1) % 100 == 0:
+            avg_reward = sum(episode_rewards[-100:]) / 100
+            print(csv_color + f"AVE, {episode+1}, {NUM_EPISODES}, {avg_reward:.2f}, {epsilon:.4f}, MOV, {moving_avg:.2f}" + "\033[0m")
+
+        # Print high score message in black.
         if total_reward > high_score:
             high_score = total_reward
-            # Print high scores in red for emphasis.
-            print("\033[91m" + f"HIGH, {episode+1}, {NUM_EPISODES}, {total_reward:.2f}, {epsilon:.4f}" + "\033[0m")
+            print("\033[30m" + f"HIGH, {episode+1}, {NUM_EPISODES}, {total_reward:.2f}, {epsilon:.4f}, MOV, {moving_avg:.2f}" + "\033[0m")
 
-        # Save checkpoint every 100 episodes
-        if (episode + 1) % 100 == 0:
+        # Save checkpoint every 500 episodes.
+        if (episode + 1) % 500 == 0:
             checkpoint = {
                 "episode": episode,
                 "policy_net_state": policy_net.state_dict(),
@@ -349,7 +409,11 @@ def train():
                 "replay_memory": memory.buffer,
             }
             torch.save(checkpoint, checkpoint_path)
-            print(f"Checkpoint saved at episode {episode+1}")
+
+        # Save a screenshot only on episodes that are rendered.
+        if episode % RENDER_EVERY == 0:
+            screenshot_path = os.path.join(screenshot_folder, f"final_state_episode_{episode+1}.png")
+            pygame.image.save(env.screen, screenshot_path)
 
     pygame.quit()
     print("Training complete!")
