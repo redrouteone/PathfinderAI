@@ -16,9 +16,9 @@ RENDER_GAME                  = True      # True: show the game window, False: no
 RENDER_EVERY_EPISODE         = 5000      # (Set to 0 if you never want normal rendering)
 
 # Replay the game ONLY if a new high score is reached?
-# - True  -> no normal rendering every N episodes; only do a replay if new high score
+# - True  -> no normal renderinfg every N episodes; only do a replay if new high score
 # - False -> normal rendering logic (every RENDER_EVERY_EPISODE episodes); no high‐score replays
-REPLAY_HIGH_SCORE_GAMES_ONLY = True
+REPLAY_HIGH_SCORE_GAMES_ONLY = False
 
 ONLY_SHOW_HIGH_SCORES        = False     # If you also want to suppress standard stats printing, set True.
 MOVING_AVG_WINDOW            = 5         # Window size for moving average of printed stats
@@ -30,7 +30,7 @@ START_EPSILON    = 1.0
 END_EPSILON      = 0.01
 
 # Option 1: multiplicative decay per episode
-EPSILON_DECAY          = 0.9999995
+EPSILON_DECAY          = 0.9995
 
 # Option 2: linear decay portion
 DECAY_PORTION          = 0.8    # Fraction of episodes to linearly decay from START->END
@@ -266,13 +266,15 @@ def epsilon_update(agent, episode):
             agent.epsilon = END_EPSILON
 
 
-def replay_game(env):
-    """
-    Replay the last game (frame by frame) when a high score is reached.
-    Press any key to exit the replay.
-    """
+def replay_game(env, replay_time=3.0):
+    """Replay the last game for `replay_time` seconds, then exit."""
+    start_time = time.time()
     replay = True
     while replay:
+        # If time is up, break
+        if time.time() - start_time >= replay_time:
+            break
+
         env.render()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -280,10 +282,9 @@ def replay_game(env):
                 return
             elif event.type == pygame.KEYDOWN:
                 # Exit replay when any key is pressed
-                replay = False  
+                replay = False
 
     print("✅ Replay complete, resuming training...")
-    # Do NOT call pygame.quit() here so the main loop can continue.
 
 
 def train_agent():
