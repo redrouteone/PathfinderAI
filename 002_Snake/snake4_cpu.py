@@ -10,7 +10,7 @@ import time
 TOTAL_EPISODES               = 2500000   # Total episodes (games)
 MAX_MOVES                    = 1000      # Max moves per episode
 PRINT_EVERY                  = 1000      # Print stats every N episodes
-RENDER_GAME                  = True      # True: show the game window, False: no window
+RENDER_GAME                  = False      # True: show the game window, False: no window
 
 # Show the game window every Nth episode
 RENDER_EVERY_EPISODE         = 5000      # (Set to 0 if you never want normal rendering)
@@ -42,7 +42,7 @@ DEATH_PENALTY  = -10
 
 
 class SnakeGame:
-    def __init__(self, width=400, height=400, grid_size=20, render_game=RENDER_GAME):
+    def __init__(self, width=1200, height=1200, grid_size=60, render_game=RENDER_GAME):
         self.width = width
         self.height = height
         self.grid_size = grid_size
