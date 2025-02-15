@@ -33,7 +33,7 @@ END_EPSILON      = 0.01
 EPSILON_DECAY          = 0.9995
 
 # Option 2: linear decay portion
-DECAY_PORTION          = 0.8    # Fraction of episodes to linearly decay from START->END
+DECAY_PORTION          = 0.1    # Fraction of episodes to linearly decay from START->END
 EPSILON_DECAY_TYPE     = "linear"  # "multiplicative" or "linear"
 
 # Rewards
